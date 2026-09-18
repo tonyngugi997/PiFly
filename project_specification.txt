@@ -1,0 +1,439 @@
+================================================================================
+LINKEDIN AUTOPILOT — FINAL PROJECT SPECIFICATION
+================================================================================
+Project:    Daily LinkedIn post automation for Tony Ngugi (Tradescene Tech)
+Owner:      Tony Ngugi
+Domain:     tradescene.org
+Status:     MVP planning — final
+Version:    3.0
+Date:       2026-09-18
+================================================================================
+
+
+1. GOAL
+--------------------------------------------------------------------------------
+Automate one LinkedIn post per day on Tony's personal account, covering:
+  - Startup life
+  - Cybersecurity
+  - Coding / engineering
+  - Corporate / B2B tech
+
+The system drafts a post, notifies Tony, lets him preview and approve,
+and posts automatically if he doesn't respond within 30 minutes.
+
+Everything important lives on Tony's own server at tradescene.org.
+The phone is only a notification receiver and a link opener.
+No third-party service holds any state.
+
+
+2. WHERE EVERYTHING LIVES
+--------------------------------------------------------------------------------
+
+  LOCATION                  WHAT'S THERE
+  ------------------------  ------------------------------------------------
+  tradescene.org (server)   n8n, Flask API, SQLite database, nginx/caddy
+  autopilot.tradescene.org  Public HTTPS entry point for preview + API
+  Tony's phone              Just receives notifications and opens links
+  Groq's servers            Free AI service that writes first drafts
+  Gemini's servers          Free AI service that proofreads on timeout
+  ntfy.sh                   Push notification delivery (or self-hosted)
+  LinkedIn's servers        Where the final post actually goes live
+
+  Recommended: run the autopilot on a SUBDOMAIN (autopilot.tradescene.org)
+  so it's isolated from Tradescene's main site. Same server, different
+  nginx block, different Flask process.
+
+
+3. WHAT THE SERVER HOLDS (SOURCES OF TRUTH)
+--------------------------------------------------------------------------------
+
+Everything that matters lives on Tony's server. Nothing important lives
+on the phone, in n8n's memory, or in any third-party service.
+
+A) THE TOPIC QUEUE (SQLite table: topics)
+   - Tony adds topics manually to this table, in advance.
+   - Each topic has: id, category, prompt text, used flag.
+   - The server hands out one topic per day, in order, and marks it used.
+   - When the queue runs low, the server can optionally ask Groq to
+     generate 10 new topics to refill it. Tony reviews and approves them.
+   - Source of truth: SQLite file on Tony's server.
+
+B) THE DRAFTS (SQLite table: drafts)
+   - Every draft ever created, with its full body text.
+   - Status: pending | approved | rejected | posted
+   - Token, token expiry, n8n resume URL, timestamps.
+   - Source of truth: SQLite file on Tony's server.
+
+C) THE SECRETS (environment variables on the server)
+   - N8N_SECRET        — shared between n8n and Flask. Long random string.
+   - HMAC_SECRET       — signs preview links. Different from N8N_SECRET.
+   - GROQ_API_KEY      — from Groq's dashboard.
+   - GEMINI_API_KEY    — from Google AI Studio.
+   - LINKEDIN_TOKEN    — inside n8n only, from LinkedIn OAuth flow.
+   - Source of truth: .env file on Tony's server, not in git.
+
+D) THE PREVIEW PAGE (Flask route + Jinja template)
+   - HTML template lives on Tony's server, in the Flask app folder.
+   - Fetches draft from SQLite, renders styled HTML, shows Approve/Reject.
+   - Source of truth: Flask app directory on Tony's server.
+
+E) THE WORKFLOW (n8n)
+   - The daily routine lives in n8n's own database (Docker volume).
+   - If n8n is wiped, the workflow can be re-imported from a JSON export
+     Tony keeps in version control.
+   - Source of truth: n8n's database + a JSON backup in git.
+
+F) THE NOTIFICATION TOPIC
+   - A single private string like "tony-linkedin-a7f3k9".
+   - n8n publishes to it, Tony's phone subscribes to it.
+   - Source of truth: nothing — it's just a name both sides agree on.
+
+
+4. HOW IT WORKS (PLAIN ENGLISH)
+--------------------------------------------------------------------------------
+
+Every day at 9am, the system wakes up and does this on its own:
+
+  1. It picks the next topic from a list Tony set up earlier.
+
+  2. It asks Groq (a free AI service) to write a first draft of the post.
+
+  3. It saves the draft on Tony's server and creates a special one-time
+     link to preview it.
+
+  4. It sends Tony a push notification on his phone with that link.
+
+Then one of two things happens:
+
+  A) Tony taps the notification, opens the preview page, reads the post,
+     and taps "Approve." The system posts it to LinkedIn right away.
+
+  B) Tony doesn't respond within 30 minutes. The system asks Gemini (a
+     second free AI service) to proofread and clean up the draft, then
+     posts it to LinkedIn automatically.
+
+Either way, once it's posted, the system marks it as done in the database
+and goes back to sleep until tomorrow.
+
+
+VISUAL
+
+  Step 1:  Wake up (every day at 9am)
+              |
+              v
+  Step 2:  Pick a topic
+              |
+              v
+  Step 3:  Groq writes a first draft
+              |
+              v
+  Step 4:  Save draft on server, create preview link
+              |
+              v
+  Step 5:  Send push notification to Tony's phone
+              |
+              v
+  Step 6:  Wait 30 minutes for Tony's response
+              |
+      +-------+-------+
+      |               |
+   Approve        No response
+      |               |
+      v               v
+  Post as-is     Gemini proofreads
+      |               |
+      |               v
+      |           Post cleaned-up version
+      |               |
+      +-------+-------+
+              |
+              v
+  Step 7:  Mark as posted, done for today
+
+
+5. DAILY FLOW (STEP BY STEP, WITH SOURCES)
+--------------------------------------------------------------------------------
+
+STEP 1 — WAKE UP
+  What:     n8n's Cron node fires at 09:00 EAT.
+  Source:   Schedule defined inside the n8n workflow.
+  Output:   Nothing. Just kicks the flow.
+
+STEP 2 — PICK A TOPIC
+  What:     n8n calls GET https://autopilot.tradescene.org/api/next-topic
+  Source:   Flask reads the topics table in SQLite, picks the oldest
+            unused row, marks it used, returns it.
+  Returns:  { "topic_id": 12, "category": "cybersec",
+              "prompt": "Why zero-trust matters for East African fintechs" }
+  If empty: Flask asks Groq to generate 10 fresh topics, saves them to
+            SQLite, then returns the first one. Tony can review the rest
+            later.
+
+STEP 3 — WRITE THE FIRST DRAFT
+  What:     n8n sends the topic prompt to Groq.
+  Source:   Groq API key stored in n8n credentials (originally from Groq
+            dashboard). The prompt text comes from Step 2.
+  Model:    llama-3.3-70b-versatile (or whatever Tony settles on).
+  Returns:  Draft text.
+  Note:     Groq does NOT store anything long-term. Its output is
+            immediately saved by Tony's server in Step 4.
+
+STEP 4 — SAVE THE DRAFT
+  What:     n8n calls POST https://autopilot.tradescene.org/api/drafts
+  Source:   Flask writes a new row to the drafts table in SQLite.
+            Flask generates a signed token: HMAC_SHA256(draft_id + expiry,
+            HMAC_SECRET).
+  Body:     {
+              "topic_id": 12,
+              "category": "cybersec",
+              "body": "<draft text>",
+              "n8n_resume_url": "<Wait node webhook URL>"
+            }
+  Returns:  {
+              "draft_id": 42,
+              "token": "abc123...",
+              "preview_url": "https://autopilot.tradescene.org/preview/abc123..."
+            }
+  Source of truth: SQLite drafts table. The draft now exists permanently
+                   on Tony's server, regardless of what happens next.
+
+STEP 5 — NOTIFY TONY
+  What:     n8n calls POST https://ntfy.sh/<private-topic>.
+  Source:   The notification topic name is hardcoded in the n8n workflow.
+            Tony subscribed to the same topic in the ntfy app on his phone
+            (one-time setup).
+  Body:     "New draft ready: <first 60 chars of draft>"
+  Header:   Actions: view, Preview, https://autopilot.tradescene.org/preview/abc123...
+  Note:     ntfy only carries the notification. The actual content lives
+            on Tony's server. If ntfy is down, Tony just doesn't get
+            pinged — the draft still exists and the timeout path still
+            fires.
+
+STEP 6 — WAIT FOR APPROVAL
+  What:     n8n's Wait node (webhook mode) sits idle for 30 minutes.
+  Source:   The webhook URL was generated by n8n and stored in SQLite in
+            Step 4 as n8n_resume_url. The resume URL itself lives on
+            Tony's server (n8n's webhook endpoint).
+
+STEP 7a — TONY APPROVES
+  What:     Tony taps the notification, lands on preview page,
+            taps Approve.
+  Source:   Browser hits POST https://autopilot.tradescene.org/api/approve/<token>
+            on Tony's Flask API. Flask verifies the token signature and
+            expiry, flips the draft status to "approved" in SQLite, then
+            calls the stored n8n_resume_url with ?approved=true.
+  Result:   n8n wakes from Wait, moves to Step 8.
+
+STEP 7b — TONY DOESN'T RESPOND
+  What:     After 30 minutes, n8n's Wait node times out.
+  Source:   n8n continues down the timeout branch on its own.
+  Action:   n8n sends the draft to Gemini for proofreading.
+  Source:   Gemini API key stored in n8n credentials (originally from
+            Google AI Studio). Draft body comes from Step 4's response.
+  Returns:  Cleaned-up draft text.
+  Result:   n8n moves to Step 8 with the cleaned draft.
+
+STEP 8 — POST TO LINKEDIN
+  What:     n8n's LinkedIn node publishes the post.
+  Source:   LinkedIn OAuth token stored in n8n credentials (originally
+            from a one-time OAuth flow Tony did). Post body comes from
+            either Step 4 (approved path) or Step 7b (timeout path).
+  Result:   Post is live on Tony's LinkedIn.
+
+STEP 9 — MARK AS POSTED
+  What:     n8n calls POST https://autopilot.tradescene.org/api/drafts/42/posted
+  Source:   Flask flips status to "posted" in SQLite and logs timestamp.
+  Result:   Row is now complete. Next day's run starts fresh.
+
+
+6. WHAT EACH PIECE DOES (PLAIN ENGLISH)
+--------------------------------------------------------------------------------
+
+  n8n
+    The conductor. Runs the whole daily routine from start to finish.
+    Lives on Tony's server in Docker. Holds the schedule, the API keys,
+    and the workflow logic. Everything it needs comes from either its
+    own credential store or Tony's Flask API.
+
+  Flask API
+    Tony's own small web service. Holds the topics queue, the drafts,
+    the approval state, and the preview page. Lives on Tony's server.
+    This is the brain. If n8n disappears tomorrow, all the important
+    data is still here.
+
+  SQLite
+    A single database file on Tony's server. Two tables: topics and
+    drafts. No separate database server to manage. Backed up by copying
+    the file.
+
+  Groq
+    Free AI service. Only used to write the first draft, and optionally
+    to refill the topic queue when it runs low. Never stores anything
+    Tony cares about.
+
+  Gemini
+    Second free AI service. Only used when Tony doesn't respond in time.
+    Proofreads the draft before it goes live. Never stores anything Tony
+    cares about.
+
+  ntfy
+    Delivery boy. Carries the notification from n8n to Tony's phone.
+    Doesn't hold content — just a short message and a link back to
+    Tony's server.
+
+  LinkedIn node
+    Inside n8n. The piece that actually publishes. Auth comes from a
+    one-time OAuth flow Tony does when setting up.
+
+  Tony's phone
+    Just receives notifications. Tapping one opens a normal browser
+    that hits Tony's domain. The phone is never a server, never a
+    tunnel, never a host. If it's off, Plan B (auto-post) still works.
+
+
+7. FLASK API SPEC
+--------------------------------------------------------------------------------
+
+All routes live at https://autopilot.tradescene.org
+
+ROUTE                              METHOD  AUTH         PURPOSE
+---------------------------------  ------  -----------  --------------------------
+/api/next-topic                    GET     bearer       Pop next unused topic
+/api/drafts                        POST    bearer       Save new draft, return token
+/preview/<token>                   GET     HMAC token   Render styled preview page
+/api/approve/<token>               POST    HMAC token   Flip state, resume n8n
+/api/reject/<token>                POST    HMAC token   Flip state, skip post
+/api/drafts/<id>/posted            POST    bearer       Mark draft as posted
+
+AUTH MODEL
+  - N8N_SECRET:       long random string, shared only between n8n and Flask
+  - HMAC_SECRET:      separate secret, used to sign preview tokens
+  - Preview token:    HMAC_SHA256(draft_id + expiry, HMAC_SECRET)
+  - Token expiry:     24 hours
+  - /api/* routes:    reject anything without bearer token
+  - Rate limit:       /api/approve/* capped at 5 requests/min
+
+
+8. DATABASE SCHEMA (SQLite)
+--------------------------------------------------------------------------------
+
+CREATE TABLE topics (
+  id         INTEGER PRIMARY KEY,
+  category   TEXT,        -- startup | cybersec | coding | corporate
+  prompt     TEXT,
+  used       INTEGER DEFAULT 0
+);
+
+CREATE TABLE drafts (
+  id              INTEGER PRIMARY KEY,
+  topic_id        INTEGER,
+  category        TEXT,
+  body            TEXT,
+  status          TEXT,   -- pending | approved | rejected | posted
+  token           TEXT,
+  token_expiry    INTEGER,
+  n8n_resume_url  TEXT,
+  created_at      INTEGER,
+  posted_at       INTEGER
+);
+
+
+9. HUMAN EXPERIENCE
+--------------------------------------------------------------------------------
+
+  09:00  Phone buzzes: "New draft ready: Why zero-trust matters..."
+  09:01  Tap notification --> browser opens preview page
+  09:01  Preview shows styled post + [Approve] [Reject]
+  09:02  Tap Approve --> "Approved" page --> n8n posts within seconds
+
+  If no tap:
+  09:30  n8n timeout fires --> Gemini proofreads --> posts anyway
+
+
+10. SECURITY MINIMUMS
+--------------------------------------------------------------------------------
+
+  [ ] N8N_SECRET is long, random, unique
+  [ ] HMAC_SECRET is separate from N8N_SECRET
+  [ ] Preview tokens expire in 24h
+  [ ] /api/* rejects requests without bearer token
+  [ ] /api/approve/* rate-limited to 5/min
+  [ ] Jinja2 autoescape ON (prevents XSS from generated content)
+  [ ] SQLite file NOT web-accessible
+  [ ] Flask runs behind reverse proxy (nginx/caddy)
+  [ ] HTTPS only (Let's Encrypt)
+  [ ] .env file not in git
+  [ ] Autopilot on its own subdomain, separate from main site
+
+
+11. COST
+--------------------------------------------------------------------------------
+
+  Component       Cost
+  --------------  ------------------------------------------------
+  Groq API        Free tier (14,400 req/day, 6k-12k tokens/min)
+  Gemini API      Free tier (~1,500 req/day, 5-10 req/min)
+  ntfy            Free (ntfy.sh) or self-hosted
+  n8n             Self-hosted = free
+  Server          Existing hosting (tradescene.org)
+  LinkedIn        Free
+  --------------  ------------------------------------------------
+  TOTAL           ~$0/month at one post per day
+
+
+12. NOT IN MVP (LATER)
+--------------------------------------------------------------------------------
+
+  - Termux preview server
+  - ngrok / Cloudflare Tunnel
+  - Multi-category queues (topics added manually to DB)
+  - Edit-in-place before posting (Approve or Reject only)
+  - Analytics (likes, comments tracking)
+  - Media / images in posts
+  - Custom scheduling times (fixed daily cron only)
+  - Auto-refill topics from Groq (manual for now)
+
+
+13. BUILD ORDER
+--------------------------------------------------------------------------------
+
+  1. Flask app + SQLite + 6 routes              (~2 hours)
+  2. preview.html Jinja template                (~30 min)
+  3. Seed 10 topics into DB manually
+  4. n8n workflow: Cron --> Groq --> save --> ntfy --> Wait --> LinkedIn  (~2 hrs)
+  5. LinkedIn OAuth in n8n                      (~30 min)
+  6. Test end-to-end with one draft
+
+  Estimated total: one weekend
+
+
+14. DECISIONS MADE
+--------------------------------------------------------------------------------
+
+  [x] Groq for drafting, Gemini for proofreading (both free tier)
+  [x] Preview page served from Tony's domain, not phone
+  [x] No Termux, no ngrok, no tunnel in MVP
+  [x] Approve/Reject only (no edit-in-place)
+  [x] Auto-post on timeout, no second notification
+  [x] Self-hosted n8n on same box as Flask API
+  [x] All state lives on Tony's server in SQLite
+  [x] Phone is only a notification receiver + link opener
+  [x] Domain: tradescene.org
+  [x] Recommended subdomain: autopilot.tradescene.org
+
+
+15. OPEN QUESTIONS
+--------------------------------------------------------------------------------
+
+  [ ] Exact Groq model to use (test a few)
+  [ ] Exact Gemini model to use (test a few)
+  [ ] Should proofreader only fix errors, or rewrite tone too?
+  [ ] What time should the daily cron fire?
+  [ ] Where do new topics come from long-term (manual vs generated)?
+  [ ] Is tradescene.org already running a web app? If so, what stack?
+  [ ] Subdomain vs path for the autopilot?
+
+
+================================================================================
+END OF SPEC
+================================================================================

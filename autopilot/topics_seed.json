@@ -1,0 +1,12 @@
+[
+  {"category": "startup", "prompt": "What building Tradescene Tech from Kenya has taught me about hiring for scrappiness over pedigree"},
+  {"category": "startup", "prompt": "The first client mistake that changed how Tradescene scopes every project since"},
+  {"category": "cybersec", "prompt": "Why zero-trust matters for East African fintechs, explained without the vendor jargon"},
+  {"category": "cybersec", "prompt": "A common security misconfiguration I see in early-stage SaaS products and how to catch it before launch"},
+  {"category": "coding", "prompt": "Why I still write things in plain SQL before reaching for an ORM abstraction"},
+  {"category": "coding", "prompt": "What a recent production bug taught me about testing edge cases, not just the happy path"},
+  {"category": "corporate", "prompt": "What enterprise clients in Kenya actually mean when they say they want 'digital transformation'"},
+  {"category": "corporate", "prompt": "The gap between a polished pitch deck and a system that survives real production traffic"},
+  {"category": "startup", "prompt": "Bootstrapping vs. raising: what changed my mind about outside capital for Tradescene"},
+  {"category": "cybersec", "prompt": "One security habit every non-technical founder should adopt in their first year"}
+]

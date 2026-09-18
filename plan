@@ -1,0 +1,276 @@
+================================================================================
+LINKEDIN AUTOPILOT — PROJECT SPECIFICATION
+================================================================================
+Project:    Daily LinkedIn post automation for Tony Ngugi (Tradescene Tech)
+Owner:      Tony Ngugi
+Status:     MVP planning
+Version:    1.0
+Date:       2026-09-18
+================================================================================
+
+
+1. GOAL
+--------------------------------------------------------------------------------
+Automate one LinkedIn post per day on Tony's personal account, covering:
+  - Startup life
+  - Cybersecurity
+  - Coding / engineering
+  - Corporate / B2B tech
+
+The system generates a draft, notifies Tony, lets him preview and approve,
+and posts automatically if he doesn't respond within a timeout window.
+
+
+2. HIGH-LEVEL ARCHITECTURE
+--------------------------------------------------------------------------------
+
+  [Cron] --> [Groq: draft] --> [Flask API: save + token] --> [ntfy: notify]
+                                                                   |
+                                                                   v
+                                                            [Tony's phone]
+                                                                   |
+                                          +------------------------+----------------------+
+                                          |                                               |
+                                    [Preview page]                                  [No action]
+                                          |                                               |
+                                    [Approve tap]                                   [30 min timeout]
+                                          |                                               |
+                                          v                                               v
+                                    [n8n resumes]                              [Gemini: proofread]
+                                          |                                               |
+                                          +----------------------+------------------------+
+                                                                 |
+                                                                 v
+                                                          [LinkedIn post]
+                                                                 |
+                                                                 v
+                                                     [Flask API: mark posted]
+
+
+3. COMPONENTS
+--------------------------------------------------------------------------------
+
+COMPONENT         WHERE                    ROLE
+----------------  -----------------------  --------------------------------------
+n8n               Server (Docker)          Orchestrator, runs daily loop
+Flask API         Server (same box)        Drafts, state, preview page, approvals
+SQLite            Server                   Stores topics and drafts
+Groq API          Cloud (free tier)        Generates first draft
+Gemini API        Cloud (free tier)        Proofreads and corrects draft
+ntfy              ntfy.sh (or self-hosted) Push notification to phone
+LinkedIn node     Inside n8n               Posts to Tony's personal LinkedIn
+
+
+4. DAILY FLOW (n8n WORKFLOW)
+--------------------------------------------------------------------------------
+
+STEP 1 — TRIGGER
+  Node:     Cron
+  Fires:    Once daily, 09:00 EAT
+  Output:   None, kicks the flow
+
+STEP 2 — PICK TOPIC
+  Node:     HTTP Request
+  Method:   GET
+  URL:      https://yourdomain.com/api/next-topic
+  Header:   Authorization: Bearer <N8N_SECRET>
+  Returns:  { "topic_id": 12, "category": "cybersec",
+              "prompt": "Why zero-trust matters for East African fintechs" }
+
+STEP 3 — GENERATE DRAFT
+  Node:     Groq Chat Model
+  Model:    llama-3.3-70b-versatile (or similar)
+  Prompt:   "Write a LinkedIn post for a Kenyan B2B software CEO.
+             Topic: {{prompt}}. Category: {{category}}.
+             Tone: direct, technical, no fluff. Max 200 words. No hashtags."
+  Output:   Draft text
+
+STEP 4 — SAVE DRAFT
+  Node:     HTTP Request
+  Method:   POST
+  URL:      https://yourdomain.com/api/drafts
+  Header:   Authorization: Bearer <N8N_SECRET>
+  Body:     {
+              "topic_id": 12,
+              "category": "cybersec",
+              "body": "<draft text>",
+              "n8n_resume_url": "<Wait node webhook URL>"
+            }
+  Returns:  {
+              "draft_id": 42,
+              "token": "abc123...",
+              "preview_url": "https://yourdomain.com/preview/abc123..."
+            }
+
+STEP 5 — NOTIFY
+  Node:     HTTP Request
+  Method:   POST
+  URL:      https://ntfy.sh/<private-topic>
+  Body:     "New draft ready: <first 60 chars>"
+  Header:   Actions: view, Preview, https://yourdomain.com/preview/abc123...
+
+STEP 6 — WAIT FOR APPROVAL
+  Node:     Wait (webhook mode)
+  Timeout:  30 minutes
+  Behavior: - If Flask API hits webhook with ?approved=true --> approved branch
+            - If 30 min pass with no hit                    --> timeout branch
+
+STEP 7a — APPROVED BRANCH
+  Node:     LinkedIn (n8n native)
+  Action:   Create Post
+  Text:     <draft body>
+  Then:     Step 8
+
+STEP 7b — TIMEOUT BRANCH
+  Node:     Google Gemini
+  Model:    gemini-2.0-flash (or similar)
+  Prompt:   "Proofread this LinkedIn post. Fix grammar and spelling.
+             Return only the corrected text. Do not change meaning or style.
+             Post: <draft body>"
+  Then:     LinkedIn node --> post
+  Then:     Step 8
+
+STEP 8 — MARK POSTED
+  Node:     HTTP Request
+  Method:   POST
+  URL:      https://yourdomain.com/api/drafts/42/posted
+  Header:   Authorization: Bearer <N8N_SECRET>
+  Effect:   Flips status to "posted", logs timestamp
+
+
+5. FLASK API SPEC
+--------------------------------------------------------------------------------
+
+ROUTE                              METHOD  AUTH         PURPOSE
+---------------------------------  ------  -----------  --------------------------
+/api/next-topic                    GET     bearer       Pop next unused topic
+/api/drafts                        POST    bearer       Save new draft, return token
+/preview/<token>                   GET     HMAC token   Render styled preview page
+/api/approve/<token>               POST    HMAC token   Flip state, resume n8n
+/api/reject/<token>                POST    HMAC token   Flip state, skip post
+/api/drafts/<id>/posted            POST    bearer       Mark draft as posted
+
+
+AUTH MODEL
+  - N8N_SECRET:       long random string, shared only between n8n and Flask
+  - HMAC_SECRET:      separate secret, used to sign preview tokens
+  - Preview token:    HMAC_SHA256(draft_id + expiry, HMAC_SECRET)
+  - Token expiry:     24 hours
+  - /api/* routes:    reject anything without bearer token
+  - Rate limit:       /api/approve/* capped at 5 requests/min
+
+
+6. DATABASE SCHEMA (SQLite)
+--------------------------------------------------------------------------------
+
+CREATE TABLE topics (
+  id         INTEGER PRIMARY KEY,
+  category   TEXT,        -- startup | cybersec | coding | corporate
+  prompt     TEXT,
+  used       INTEGER DEFAULT 0
+);
+
+CREATE TABLE drafts (
+  id              INTEGER PRIMARY KEY,
+  topic_id        INTEGER,
+  category        TEXT,
+  body            TEXT,
+  status          TEXT,   -- pending | approved | rejected | posted
+  token           TEXT,
+  token_expiry    INTEGER,
+  n8n_resume_url  TEXT,
+  created_at      INTEGER,
+  posted_at       INTEGER
+);
+
+
+7. HUMAN EXPERIENCE
+--------------------------------------------------------------------------------
+
+  09:00  Phone buzzes: "New draft ready: Why zero-trust matters..."
+  09:01  Tap notification --> browser opens preview page
+  09:01  Preview shows styled post + [Approve] [Reject]
+  09:02  Tap Approve --> "Approved" page --> n8n posts within seconds
+
+  If no tap:
+  09:30  n8n timeout fires --> Gemini proofreads --> posts anyway
+
+
+8. SECURITY MINIMUMS
+--------------------------------------------------------------------------------
+
+  [ ] N8N_SECRET is long, random, unique
+  [ ] HMAC_SECRET is separate from N8N_SECRET
+  [ ] Preview tokens expire in 24h
+  [ ] /api/* rejects requests without bearer token
+  [ ] /api/approve/* rate-limited to 5/min
+  [ ] Jinja2 autoescape ON (prevents XSS from generated content)
+  [ ] SQLite file NOT web-accessible
+  [ ] Flask runs behind reverse proxy (nginx/caddy)
+  [ ] HTTPS only (Let's Encrypt)
+
+
+9. COST
+--------------------------------------------------------------------------------
+
+  Component       Cost
+  --------------  ------------------------------------------------
+  Groq API        Free tier (14,400 req/day, 6k-12k tokens/min)
+  Gemini API      Free tier (~1,500 req/day, 5-10 req/min)
+  ntfy            Free (ntfy.sh) or self-hosted
+  n8n             Self-hosted = free
+  Server          Existing hosting
+  LinkedIn        Free
+  --------------  ------------------------------------------------
+  TOTAL           ~$0/month at one post per day
+
+
+10. NOT IN MVP (LATER)
+--------------------------------------------------------------------------------
+
+  - Termux preview server
+  - ngrok / Cloudflare Tunnel
+  - Multi-category queues (topics added manually to DB)
+  - Edit-in-place before posting (Approve or Reject only)
+  - Analytics (likes, comments tracking)
+  - Media / images in posts
+  - Custom scheduling times (fixed daily cron only)
+
+
+11. BUILD ORDER
+--------------------------------------------------------------------------------
+
+  1. Flask app + SQLite + 6 routes              (~2 hours)
+  2. preview.html Jinja template                (~30 min)
+  3. Seed 10 topics into DB manually
+  4. n8n workflow: Cron --> Groq --> save --> ntfy --> Wait --> LinkedIn  (~2 hrs)
+  5. LinkedIn OAuth in n8n                      (~30 min)
+  6. Test end-to-end with one draft
+
+  Estimated total: one weekend
+
+
+12. DECISIONS MADE
+--------------------------------------------------------------------------------
+
+  [x] Groq for drafting, Gemini for proofreading (both free tier)
+  [x] Preview page served from domain, not phone
+  [x] No Termux, no ngrok, no tunnel in MVP
+  [x] Approve/Reject only (no edit-in-place)
+  [x] Auto-post on timeout, no second notification
+  [x] Self-hosted n8n on same box as Flask API
+
+
+13. OPEN QUESTIONS
+--------------------------------------------------------------------------------
+
+  [ ] Exact Groq model to use (test a few)
+  [ ] Exact Gemini model to use (test a few)
+  [ ] Should proofreader only fix errors, or rewrite tone too?
+  [ ] What time should the daily cron fire?
+  [ ] Where do new topics come from long-term (manual vs generated)?
+
+
+================================================================================
+END OF SPEC
+================================================================================
