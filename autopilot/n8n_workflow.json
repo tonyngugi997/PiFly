@@ -1,0 +1,317 @@
+{
+  "name": "LinkedIn Autopilot",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * *"
+            }
+          ]
+        }
+      },
+      "id": "trigger-cron",
+      "name": "Every Day 09:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-1400, 0]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://autopilot.tradescene.org/api/next-topic",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "get-next-topic",
+      "name": "Get Next Topic",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-1160, 0],
+      "credentials": {
+        "httpHeaderAuth": { "id": "1", "name": "Autopilot Bearer" }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"model\": \"llama-3.3-70b-versatile\", \"temperature\": 0.7, \"messages\": [ { \"role\": \"system\", \"content\": \"You are ghostwriting LinkedIn posts for Tony Ngugi, founder of Tradescene Tech, a Kenya-based software company. Tone: direct, technical, first person, no fluff. Max 200 words. No hashtags. No emojis unless they genuinely fit.\" }, { \"role\": \"user\", \"content\": \"Category: \" + $json.category + \"\\nTopic: \" + $json.prompt } ] } }}",
+        "options": {}
+      },
+      "id": "groq-draft",
+      "name": "Groq: Draft Post",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-920, 0],
+      "credentials": {
+        "httpHeaderAuth": { "id": "2", "name": "Groq API" }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "topic_id",
+              "value": "={{ $node[\"Get Next Topic\"].json[\"topic_id\"] }}",
+              "type": "number"
+            },
+            {
+              "name": "category",
+              "value": "={{ $node[\"Get Next Topic\"].json[\"category\"] }}",
+              "type": "string"
+            },
+            {
+              "name": "draft_body",
+              "value": "={{ $json.choices[0].message.content.trim() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "extract-draft-text",
+      "name": "Extract Draft Text",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-680, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://autopilot.tradescene.org/api/drafts",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"topic_id\": $json.topic_id, \"category\": $json.category, \"body\": $json.draft_body, \"n8n_resume_url\": $execution.resumeUrl } }}",
+        "options": {}
+      },
+      "id": "save-draft",
+      "name": "Save Draft",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-440, 0],
+      "credentials": {
+        "httpHeaderAuth": { "id": "1", "name": "Autopilot Bearer" }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://ntfy.sh/tony-linkedin-a7f3k9",
+        "sendBody": true,
+        "specifyBody": "raw",
+        "rawContentType": "text/plain",
+        "body": "=New draft ready: {{ $node[\"Extract Draft Text\"].json.draft_body.slice(0, 60) }}...",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Title", "value": "LinkedIn Autopilot" },
+            { "name": "Actions", "value": "=view, Preview, {{ $json.preview_url }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "notify-ntfy",
+      "name": "Notify ntfy",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-200, 0]
+    },
+    {
+      "parameters": {
+        "resume": "webhook",
+        "limitWaitTime": true,
+        "limitType": "afterTimeInterval",
+        "resumeAmount": 30,
+        "resumeUnit": "minutes",
+        "options": {}
+      },
+      "id": "wait-for-approval",
+      "name": "Wait for Approval",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [40, 0],
+      "webhookId": "autopilot-wait-approval"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "typeValidation": "strict" },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.query.approved }}",
+                    "rightValue": "true",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "approved"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "typeValidation": "strict" },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.query.approved }}",
+                    "rightValue": "false",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "rejected"
+            }
+          ]
+        },
+        "fallbackOutput": "extra",
+        "options": {}
+      },
+      "id": "route-by-response",
+      "name": "Route by Response",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [300, 0]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "final_body",
+              "value": "={{ $node[\"Extract Draft Text\"].json.draft_body }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "use-original-draft",
+      "name": "Use Original Draft",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [560, -160]
+    },
+    {
+      "parameters": {},
+      "id": "rejected-stop",
+      "name": "Rejected - No Action",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [560, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"contents\": [ { \"parts\": [ { \"text\": \"Proofread this LinkedIn post: fix grammar and spelling, and lightly tighten awkward phrasing for tone. Do not change the meaning, facts, or overall voice. Return only the corrected text, no preamble.\\n\\nPost:\\n\" + $node[\"Extract Draft Text\"].json.draft_body } ] } ] } }}",
+        "options": {}
+      },
+      "id": "gemini-proofread",
+      "name": "Gemini: Proofread",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [560, 160],
+      "credentials": {
+        "httpHeaderAuth": { "id": "3", "name": "Gemini API" }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "final_body",
+              "value": "={{ $json.candidates[0].content.parts[0].text.trim() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "proofread-result",
+      "name": "Proofread Result",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [800, 160]
+    },
+    {
+      "parameters": {
+        "text": "={{ $json.final_body }}",
+        "postAs": "person",
+        "shareMediaCategory": "NONE",
+        "additionalFields": {}
+      },
+      "id": "post-to-linkedin",
+      "name": "Post to LinkedIn",
+      "type": "n8n-nodes-base.linkedIn",
+      "typeVersion": 1,
+      "position": [1040, 0],
+      "credentials": {
+        "linkedInOAuth2Api": { "id": "4", "name": "LinkedIn Autopilot" }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://autopilot.tradescene.org/api/drafts/{{ $node[\"Save Draft\"].json[\"draft_id\"] }}/posted",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "mark-posted",
+      "name": "Mark Posted",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1280, 0],
+      "credentials": {
+        "httpHeaderAuth": { "id": "1", "name": "Autopilot Bearer" }
+      }
+    }
+  ],
+  "connections": {
+    "Every Day 09:00": { "main": [[{ "node": "Get Next Topic", "type": "main", "index": 0 }]] },
+    "Get Next Topic": { "main": [[{ "node": "Groq: Draft Post", "type": "main", "index": 0 }]] },
+    "Groq: Draft Post": { "main": [[{ "node": "Extract Draft Text", "type": "main", "index": 0 }]] },
+    "Extract Draft Text": { "main": [[{ "node": "Save Draft", "type": "main", "index": 0 }]] },
+    "Save Draft": { "main": [[{ "node": "Notify ntfy", "type": "main", "index": 0 }]] },
+    "Notify ntfy": { "main": [[{ "node": "Wait for Approval", "type": "main", "index": 0 }]] },
+    "Wait for Approval": { "main": [[{ "node": "Route by Response", "type": "main", "index": 0 }]] },
+    "Route by Response": {
+      "main": [
+        [{ "node": "Use Original Draft", "type": "main", "index": 0 }],
+        [{ "node": "Rejected - No Action", "type": "main", "index": 0 }],
+        [{ "node": "Gemini: Proofread", "type": "main", "index": 0 }]
+      ]
+    },
+    "Use Original Draft": { "main": [[{ "node": "Post to LinkedIn", "type": "main", "index": 0 }]] },
+    "Gemini: Proofread": { "main": [[{ "node": "Proofread Result", "type": "main", "index": 0 }]] },
+    "Proofread Result": { "main": [[{ "node": "Post to LinkedIn", "type": "main", "index": 0 }]] },
+    "Post to LinkedIn": { "main": [[{ "node": "Mark Posted", "type": "main", "index": 0 }]] }
+  },
+  "settings": {
+    "timezone": "Africa/Nairobi",
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "linkedin-autopilot"
+  }
+}

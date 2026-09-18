@@ -420,18 +420,19 @@ CREATE TABLE drafts (
   [x] Phone is only a notification receiver + link opener
   [x] Domain: tradescene.org
   [x] Recommended subdomain: autopilot.tradescene.org
+  [x] tradescene.org already runs Flask (app.py at repo root) — autopilot is
+      a separate Flask process/app (autopilot/), not bolted onto the main site
+  [x] Groq model: llama-3.3-70b-versatile
+  [x] Gemini model: gemini-2.0-flash
+  [x] Proofreader scope: grammar/spelling fixes + light tone tightening,
+      no meaning/fact changes
+  [x] Daily cron: 09:00 Africa/Nairobi (EAT)
 
 
 15. OPEN QUESTIONS
 --------------------------------------------------------------------------------
 
-  [ ] Exact Groq model to use (test a few)
-  [ ] Exact Gemini model to use (test a few)
-  [ ] Should proofreader only fix errors, or rewrite tone too?
-  [ ] What time should the daily cron fire?
   [ ] Where do new topics come from long-term (manual vs generated)?
-  [ ] Is tradescene.org already running a web app? If so, what stack?
-  [ ] Subdomain vs path for the autopilot?
 
 
 ================================================================================
